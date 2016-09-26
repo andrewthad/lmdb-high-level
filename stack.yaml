@@ -1,0 +1,7 @@
+resolver: lts-7.0
+packages:
+  - '.'
+extra-deps:
+  - 'lmdb-0.2.5'
+flags: {}
+extra-package-dbs: []
