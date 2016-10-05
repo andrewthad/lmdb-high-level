@@ -1,15 +1,20 @@
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE ExistentialQuantification #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE RankNTypes #-}
 module Lmdb.Types where
 
 import Database.LMDB.Raw
-import Foreign.C.Types (CSize(..))
-import Foreign.Ptr (Ptr)
+import Foreign.C.Types (CSize(..),CInt)
+import Foreign.Ptr (Ptr,FunPtr)
 import Data.Word
+import Data.Primitive.ByteArray (ByteArray)
+import qualified Data.Vector.Unboxed as UVector
+import qualified Data.Vector.Primitive as PVector
 
 -- | We only use the promoted version of this data type.
 data Mode = ReadOnly | ReadWrite
@@ -32,43 +37,124 @@ newtype Transaction (t :: Mode) = Transaction
   }
 
 data Cursor (t :: Mode) k v = Cursor
-  { cursorRef :: MDB_cursor'
-  , cursorDbiSettings :: DbiSettings k v
+  { cursorRef :: !CursorByFfi
+  , cursorDatabaseSettings :: !(DatabaseSettings k v)
   }
+
+data MultiCursor (t :: Mode) k v = MultiCursor
+  { multiCursorRef :: !CursorByFfi
+  , multiCursorDatabaseSettings :: !(MultiDatabaseSettings k v)
+  }
+
 
 data KeyValue k v = KeyValue
   { keyValueKey :: !k
   , keyValueValue :: !v
   }
 
-data DbiHandle k v = DbiHandle
-  { dbiHandleRef :: {-# UNPACK #-} !MDB_dbi'
-  , dbiHandleSettings :: !(DbiSettings k v)
+data CursorByFfi
+  = CursorSafe !MDB_cursor
+  | CursorUnsafe !MDB_cursor'
+
+data DbiByFfi
+  = DbiSafe !MDB_dbi
+  | DbiUnsafe !MDB_dbi'
+
+data Database k v = Database
+  { databaseRef :: !DbiByFfi
+  , databaseTheSettings :: !(DatabaseSettings k v)
   }
 
-data DbiSettings k v = DbiSettings
-  { dbiSettingsSort :: Sort k -- ^ Sorting
-  , dbiSettingsEncodeKey :: k -> Encoding
-  , dbiSettingsDecodeKey :: CSize -> Ptr Word8 -> IO k
-  , dbiSettingsEncodeValue :: v -> Encoding
-  , dbiSettingsDecodeValue :: CSize -> Ptr Word8 -> IO v
+data MultiDatabase k v = MultiDatabase
+  { multiDatabaseRef :: DbiByFfi
+  , multiDatabaseTheSettings :: !(MultiDatabaseSettings k v)
   }
 
-data Codec a = Codec
-  { codecEncode :: a -> Encoding
-  , codecDecode :: CSize -> Ptr Word8 -> IO a
+data DatabaseSettings k v = forall ks vs. DatabaseSettings
+  { databaseSettingsSort :: !(Sort ks k) -- ^ Sorting
+  , databaseSettingsEncodeKey :: !(Encoding ks k)
+  , databaseSettingsDecodeKey :: !(Decoding k)
+  , databaseSettingsEncodeValue :: !(Encoding vs v)
+  , databaseSettingsDecodeValue :: !(Decoding v)
   }
 
-data Encoding = Encoding
-  { encodingSize :: {-# UNPACK #-} !CSize -- size in bytes
-  , encodingPoke :: !(Ptr Word8 -> IO ())
+data MultiDatabaseSettings k v = forall ks vs. MultiDatabaseSettings
+  { multiDatabaseSettingsSortKey :: Sort ks k
+  , multiDatabaseSettingsSortValue :: Sort vs v
+  , multiDatabaseSettingsEncodeKey :: !(Encoding ks k)
+  , multiDatabaseSettingsDecodeKey :: !(Decoding k)
+  , multiDatabaseSettingsEncodeValue :: !(Encoding vs v)
+  , multiDatabaseSettingsDecodeValue :: !(Decoding v)
   }
 
-data Sort a
-  = SortLexographic
-  | SortLexographicBackward
-  | SortIntegralIncreasing
-  | SortCustom (a -> a -> Ordering)
+data Codec s a = Codec
+  { codecEncode :: !(Encoding s a)
+  , codecDecode :: !(Decoding a)
+  -- , codecMultiEncode :: !(MultiEncoding s a)
+  -- , codecMultiDecode :: !(MultiDecoding s a)
+  }
+
+newtype Decoding a = Decoding { getDecoding :: CSize -> Ptr Word8 -> IO a }
+-- newtype Encoding a = Encoding { getEncoding :: a -> SizedPoke }
+
+-- data SomeFixedSize (s :: Size) where
+--   SomeFixedSizeFixed :: CSize -> SomeFixedSize 'Fixed
+--   SomeFixedSizeMachineWord :: SomeFixedSize 'MachineWord
+--
+-- data MultiEncoding (s :: Size) a where
+--   MultiEncodingNone :: MultiEncoding 'Variable a
+--   MultiEncodingUnboxedVector :: SomeFixedSize s
+--     -> (ByteArray -> Ptr Word8 -> IO ()) -- todo: remove this entirely
+--     -> MultiEncoding s a
+--   -- MultiEncodingIndexedTraversal :: CSize
+--   --   -> (forall f b. ((Int -> a -> IO b) -> f a -> IO ()) -> f a -> Ptr Word8 -> IO ())
+--   --   -> MultiEncoding 'Fixed a
+--
+-- data MultiDecoding (s :: Size) a where
+--   MultiDecodingNone :: MultiDecoding 'Variable a
+--   MultiDecodingUnboxedVector :: SomeFixedSize s
+--     -> (Int -> Ptr Word8 -> IO ByteArray) -- todo: remove this entirely
+--     -> (forall m b. Monad m => (a -> m b) -> ByteArray -> m ()) -- maybe get rid of this too...
+--     -> MultiDecoding s a
+
+data Encoding (s :: Size) a where
+  EncodingVariable :: (a -> SizedPoke) -> Encoding 'Variable a
+  EncodingFixed :: CSize -> (a -> FixedPoke) -> Encoding 'Fixed a
+  EncodingMachineWord :: (a -> FixedPoke) -> Encoding 'MachineWord a
+
+data SizedPoke = SizedPoke
+  { sizedPokeSize :: {-# UNPACK #-} !CSize -- ^ size in bytes
+  , sizedPokePoke :: !(Ptr Word8 -> IO ())
+  }
+
+newtype FixedPoke = FixedPoke { getFixedPoke :: Ptr Word8 -> IO () }
+
+data Size
+  = Variable
+  | Fixed
+  | MachineWord
+
+data NativeSort (s :: Size) where
+  NativeSortLexographic :: NativeSort 'Variable
+  NativeSortLexographicBackward :: NativeSort 'Variable
+  NativeSortInteger :: NativeSort 'MachineWord
+
+data CustomSort a
+  = CustomSortSafe (a -> a -> Ordering)
+  | CustomSortUnsafe (FunPtr (Ptr MDB_val -> Ptr MDB_val -> IO CInt))
+
+data Sort (s :: Size) a where
+  SortNative :: NativeSort s -> Sort s a
+  SortCustom :: CustomSort a -> Sort 'Variable a
+
+data Movement k
+  = MovementNext
+  | MovementPrev
+  | MovementFirst
+  | MovementLast
+  | MovementAt !k
+  | MovementAtGte !k
+  | MovementCurrent
 
 -- data SingMode (x :: Mode) where
 --   SingReadOnly :: SingMode 'ReadOnly
