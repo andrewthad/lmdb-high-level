@@ -70,6 +70,11 @@ mdb_cursor_get_X op x k v = case x of
   CursorSafe cur -> mdb_cursor_get op cur k v
   CursorUnsafe cur -> mdb_cursor_get' op cur k v
 
+mdb_cursor_del_X :: MDB_WriteFlags -> CursorByFfi -> IO ()
+mdb_cursor_del_X op x = case x of
+  CursorSafe cur -> mdb_cursor_del op cur
+  CursorUnsafe cur -> mdb_cursor_del' op cur
+
 mdb_dbi_close_X :: MDB_env -> DbiByFfi -> IO ()
 mdb_dbi_close_X env x = case x of
   DbiSafe dbi -> mdb_dbi_close env dbi
@@ -155,7 +160,6 @@ insertInternal flags txn db k v =
 insertInternal' :: MDB_WriteFlags -> Transaction 'ReadWrite -> Database k v -> k -> v -> IO ()
 insertInternal' a b c d e = insertInternal a b c d e $> ()
 
-
 noWriteFlags :: MDB_WriteFlags
 noWriteFlags = compileWriteFlags []
 
@@ -224,4 +228,10 @@ decodeResults settings success keyPtr valPtr = if success
     return (Just (KeyValue key val))
   else return Nothing
 {-# INLINE decodeResults #-}
+
+getWithoutKey :: MDB_cursor_op -> Cursor e k v -> IO (Maybe (KeyValue k v))
+getWithoutKey op (Cursor cur settings) = do
+  withKVPtrsNoInit $ \(keyPtr :: Ptr MDB_val) (valPtr :: Ptr MDB_val) -> do
+    success <- mdb_cursor_get_X op cur keyPtr valPtr
+    decodeResults settings success keyPtr valPtr
 

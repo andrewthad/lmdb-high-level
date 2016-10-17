@@ -41,13 +41,16 @@ module Lmdb.Map
     -- ** Writing
   , insert
   , insertSuccess
+  , lastsert
   , repsert
+  , delete
     -- * Cursorless Operations
     -- ** Reading
   , lookup'
     -- ** Writing
   , insert'
   , insertSuccess'
+  , lastsert'
   , repsert'
   ) where
 
@@ -190,6 +193,9 @@ serverRaw cursor initialAction = lift (initialAction cursor) >>= go
     m <- lift (action cursor)
     go m
 
+-- | Terminates when the user makes a movement that cannot be satisfied.
+--   This could happen, for example, if the 'Cursor' were positioned at
+--   the last element and the downstream 'Proxy' requested 'MovementNext'.
 serverRequired :: forall e k v.
      Cursor e k v
   -> Movement k
@@ -259,12 +265,6 @@ getKeyWithKey op (Cursor cur settings) k = do
       success <- mdb_cursor_get_X op cur keyPtr valPtr
       decodeOne (getDecoding $ databaseSettingsDecodeKey settings) success keyPtr
 
-getWithoutKey :: MDB_cursor_op -> Cursor e k v -> IO (Maybe (KeyValue k v))
-getWithoutKey op (Cursor cur settings) = do
-  withKVPtrsNoInit $ \(keyPtr :: Ptr MDB_val) (valPtr :: Ptr MDB_val) -> do
-    success <- mdb_cursor_get_X op cur keyPtr valPtr
-    decodeResults settings success keyPtr valPtr
-
 getWithoutKey_ :: MDB_cursor_op -> Cursor e k v -> IO Bool
 getWithoutKey_ op (Cursor cur settings) = do
   withKVPtrsNoInit $ \(keyPtr :: Ptr MDB_val) (valPtr :: Ptr MDB_val) -> do
@@ -305,6 +305,13 @@ insert' a b c d = do
 insertSuccess' :: Transaction 'ReadWrite -> Database k v -> k -> v -> IO Bool
 insertSuccess' = insertInternal noOverwriteFlags
 
+-- | Insert a value at the end of the database, throwing an exception if the
+--   provided key is not greater than all existing keys in the database.
+lastsert' :: Transaction 'ReadWrite -> Database k v -> k -> v -> IO ()
+lastsert' a b c d = do
+  success <- insertInternal appendFlags a b c d
+  when (not success) $ fail "LMDB lastsert': key was not greater than all existing keys"
+
 insert :: Cursor 'ReadWrite k v -> k -> v -> IO ()
 insert cur k v = do
   success <- insertInternalCursorNeutral noOverwriteFlags (Right cur) k v
@@ -317,5 +324,13 @@ repsert cur k v = do
 
 insertSuccess :: Cursor 'ReadWrite k v -> k -> v -> IO Bool
 insertSuccess cur k v = insertInternalCursorNeutral noOverwriteFlags (Right cur) k v
+
+lastsert :: Cursor 'ReadWrite k v -> k -> v -> IO ()
+lastsert cur k v = do
+  success <- insertInternalCursorNeutral appendFlags (Right cur) k v
+  when (not success) $ fail "LMDB lastsert: key was not greater than all existing keys"
+
+delete :: Cursor 'ReadWrite k v -> IO ()
+delete (Cursor cur _) = mdb_cursor_del_X noWriteFlags cur
 
 

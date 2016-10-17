@@ -13,6 +13,7 @@ import Foreign.C.Types (CSize(..),CInt)
 import Foreign.Ptr (Ptr,FunPtr)
 import Data.Word
 import Data.Primitive.ByteArray (ByteArray)
+import Control.Monad
 import qualified Data.Vector.Unboxed as UVector
 import qualified Data.Vector.Primitive as PVector
 
@@ -51,6 +52,46 @@ data KeyValue k v = KeyValue
   { keyValueKey :: !k
   , keyValueValue :: !v
   }
+
+data KeyValues k v a = KeyValues
+  { keyValuesKey :: !k
+  , keyValuesValue :: v a
+  }
+
+data FreeF f a b = Pure a | Free (f b)
+newtype FreeT f m a = FreeT { runFreeT :: m (FreeF f a (FreeT f m a)) }
+
+instance Functor f => Functor (FreeF f a) where
+  fmap _ (Pure a)  = Pure a
+  fmap f (Free as) = Free (fmap f as)
+  {-# INLINE fmap #-}
+
+instance (Functor f, Monad m) => Functor (FreeT f m) where
+  fmap f (FreeT m) = FreeT (liftM f' m) where
+    f' (Pure a)  = Pure (f a)
+    f' (Free as) = Free (fmap (fmap f) as)
+
+instance (Functor f, Monad m) => Applicative (FreeT f m) where
+  pure a = FreeT (return (Pure a))
+  {-# INLINE pure #-}
+  (<*>) = ap
+  {-# INLINE (<*>) #-}
+
+
+instance (Functor f, Monad m) => Monad (FreeT f m) where
+  fail e = FreeT (fail e)
+  return = pure
+  {-# INLINE return #-}
+  FreeT m >>= f = FreeT $ m >>= \v -> case v of
+    Pure a -> runFreeT (f a)
+    Free w -> return (Free (fmap (>>= f) w))
+
+
+
+-- data KeyValues k v = KeyValues
+--   { keyValuesKey :: !k
+--   , keyValuesValues
+--   }
 
 data CursorByFfi
   = CursorSafe !MDB_cursor
@@ -155,6 +196,10 @@ data Movement k
   | MovementAt !k
   | MovementAtGte !k
   | MovementCurrent
+
+-- data Action
+--   = ActionDelete
+--   | ActionUpdate v
 
 -- data SingMode (x :: Mode) where
 --   SingReadOnly :: SingMode 'ReadOnly
